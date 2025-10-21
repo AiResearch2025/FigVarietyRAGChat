@@ -1,4 +1,4 @@
-# === 벡터DB 생성 ===
+# === varieties 벡터DB 생성 ===
 
 import os
 from langchain_community.vectorstores import FAISS
