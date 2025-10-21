@@ -3,7 +3,7 @@
 # Core LangChain components
 langchain-core
 langchain-community
-langchain-google-genai
+
 langchain-huggingface
 
 # Vector store

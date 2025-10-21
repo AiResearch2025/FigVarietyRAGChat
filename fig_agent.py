@@ -1,13 +1,10 @@
-# === Fig Variety AI Agent (v3.2 - Gemini Hotfix) ===
+# === Fig Variety AI Agent (v4.0 - Direct Gemini SDK) ===
 
 import os
 from enum import Enum, auto
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings # Deprecation 경고 해결
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
+from langchain_huggingface import HuggingFaceEmbeddings
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 # .env 파일에서 환경 변수를 로드합니다.
@@ -24,12 +21,11 @@ class QueryCategory(Enum):
 
 class FigAgent:
     """
-    사용자 질문을 분류하고 RAG 파이프라인을 관리하는 AI 에이전트 (Gemini 버전)
+    사용자 질문을 분류하고 RAG 파이프라인을 관리하는 AI 에이전트 (Gemini SDK 직접 호출 버전)
     """
     def __init__(self, varieties_db_path="./vector_db", features_db_path="./features_db", model_name="intfloat/multilingual-e5-base"):
-        print("🤖 Fig Agent (Gemini)를 초기화하는 중입니다...")
+        print("🤖 Fig Agent (Direct Gemini SDK)를 초기화하는 중입니다...")
         
-        # Deprecation 경고가 해결된 새로운 클래스를 사용합니다.
         self.embedding = HuggingFaceEmbeddings(model_name=model_name)
         
         try:
@@ -39,41 +35,17 @@ class FigAgent:
             print(f"DB 로드 실패: {e}")
             raise
 
-        # --- LLM 및 RAG 체인 설정 (Gemini) ---
-        # os.getenv를 사용하여 GOOGLE_API_KEY를 명시적으로 불러옵니다.
+        # --- LLM 설정 (google-generativeai SDK 직접 사용) ---
         google_api_key = os.getenv("GEMINI_API_KEY")
         if not google_api_key:
-            raise ValueError("GOOGLE_API_KEY 환경 변수를 찾을 수 없습니다. .env 파일을 확인해주세요.")
-            
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-pro", 
-            google_api_key=google_api_key, 
-            temperature=0, 
-            convert_system_message_to_human=True
-        )
+            raise ValueError("GEMINI_API_KEY 환경 변수를 찾을 수 없습니다. .env 파일을 확인해주세요.")
+        
+        genai.configure(api_key=google_api_key)
+        self.llm = genai.GenerativeModel('gemini-2.5-flash') 
+
+        # --- Retriever 설정 (LangChain 사용) ---
         self.retriever = self.features_db.as_retriever(search_kwargs={'k': 3})
         
-        prompt_template = """
-        당신은 무화과 품종 전문가입니다. 사용자의 질문에 대해 아래의 '검색된 정보'를 바탕으로 친절하고 명확하게 답변해주세요.
-        답변은 반드시 한국어로 작성해야 합니다. 정보가 부족하여 답변할 수 없는 경우, "정보가 부족하여 답변하기 어렵습니다."라고 솔직하게 말해주세요.
-        
-        [검색된 정보]
-        {context}
-        
-        [사용자 질문]
-        {question}
-        
-        [전문가 답변]
-        """
-        self.prompt = ChatPromptTemplate.from_template(prompt_template)
-
-        self.rag_chain = (
-            {"context": self.retriever, "question": RunnablePassthrough()}
-            | self.prompt
-            | self.llm
-            | StrOutputParser()
-        )
-
         # --- 별명 및 오타 처리 시스템 ---
         self.variety_aliases = {
             "Brunswick": ["brunswick", "브런즈윅"],
@@ -93,6 +65,39 @@ class FigAgent:
         
         print("✅ Agent 초기화 완료.")
 
+    def _generate_rag_response(self, query: str) -> str:
+        """RAG 파이프라인을 수동으로 실행하여 답변을 생성합니다."""
+        print(f"  🔍 '{query}'에 대한 관련 문서 검색 중...")
+        docs = self.retriever.get_relevant_documents(query)
+
+        if not docs:
+            return "관련 정보를 찾지 못했습니다. 질문을 조금 더 구체적으로 해주시겠어요?"
+
+        # 검색된 문서 내용을 하나의 컨텍스트 문자열로 합칩니다.
+        context = "\n".join([doc.page_content for doc in docs])
+        
+        prompt_template = f"""
+        당신은 무화과 품종 전문가입니다. 사용자의 질문에 대해 아래의 '검색된 정보'를 바탕으로 친절하고 명확하게 답변해주세요.
+        답변은 반드시 한국어로 작성해야 합니다. 정보가 부족하여 답변할 수 없는 경우, "정보가 부족하여 답변하기 어렵습니다."라고 솔직하게 말해주세요.
+        
+        [검색된 정보]
+        {context}
+        
+        [사용자 질문]
+        {query}
+        
+        [전문가 답변]
+        """
+        
+        print("  🧠 LLM이 답변 생성 중...")
+        try:
+            response = self.llm.generate_content(prompt_template)
+            return response.text
+        except Exception as e:
+            print(f"  ❗️ LLM 호출 중 오류 발생: {e}")
+            return "답변을 생성하는 중에 오류가 발생했습니다."
+
+
     def _extract_variety_from_query(self, query: str) -> tuple[str, str] | None:
         """질문에서 (매칭된 별명, 표준 품종명) 튜플을 추출합니다."""
         query_lower = query.lower()
@@ -103,7 +108,6 @@ class FigAgent:
 
     def _classify_query(self, query: str) -> tuple[QueryCategory, dict]:
         """질문을 분석하여 카테고리와 관련 데이터를 반환합니다."""
-        
         chitchat_keywords = ["안녕", "고마워", "감사", "땡큐"]
         if any(keyword in query for keyword in chitchat_keywords):
             return QueryCategory.CHITCHAT, {}
@@ -147,35 +151,32 @@ class FigAgent:
             return f"'{data['variety']}' 품종에 대해 어떤 점이 궁금하신가요? 맛, 생산성, 나무 크기 등 구체적인 기준을 알려주시면 더 자세히 답변해 드릴 수 있습니다."
 
         elif category == QueryCategory.KNOWN_VARIETY_EXISTS:
-            print(f"  ▶️ '{data['variety']}'에 대한 정보 검색 및 답변 생성 중...")
-            return self.rag_chain.invoke(data['query'])
+            print(f"  ▶️ '{data['variety']}'에 대한 정보 검색 및 답변 생성 시작...")
+            return self._generate_rag_response(data['query'])
 
         elif category == QueryCategory.UNKNOWN_VARIETY_GENERAL_QUERY:
-            print("  ▶️ 특징 DB에서 추천 품종 검색 및 답변 생성 중...")
-            return self.rag_chain.invoke(data['query'])
+            print("  ▶️ 특징 DB에서 추천 품종 검색 및 답변 생성 시작...")
+            return self._generate_rag_response(data['query'])
             
         else:
             return "죄송합니다. 질문을 이해하지 못했습니다."
 
-# === Agent 실행 예시 ===
+# === 대화형 Agent 실행 ===
 if __name__ == '__main__':
     try:
         agent = FigAgent()
-        
-        queries_to_test = [
-            "안녕?",
-            "브런즈윅의 내한성은 어떤가요?",
-            "Ciccio Vero는 키우기 쉬운가요?",
-            "브런즈윅은 키울만 한가요?",
-            "달콤한 품종 추천해줘",
-            "이 사진 속 무화과는 무슨 품종이야?",
-            "고마워"
-        ]
-        
-        for q in queries_to_test:
-            print(f"\n👤 사용자 질문: {q}")
-            response = agent.handle_query(q)
-            print(f"🤖 Agent 응답: {response}")
+        print("\n--- 무화과 품종 챗봇 ---")
+        print("안녕하세요! 무화과에 대해 궁금한 점을 물어보세요.")
+        print("(종료하시려면 'exit' 또는 'quit'을 입력하세요)")
+
+        while True:
+            user_query = input("\n👤 나: ")
+            if user_query.lower() in ["exit", "quit"]:
+                print("🤖 Agent: 이용해주셔서 감사합니다.")
+                break
+            
+            response = agent.handle_query(user_query)
+            print(f"🤖 Agent: {response}")
 
     except Exception as e:
-        print(f"Agent 실행 중 오류 발생: {e}")
+        print(f"\n❗️ Agent 실행 중 오류 발생: {e}")
