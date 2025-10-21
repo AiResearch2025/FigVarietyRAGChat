@@ -1,9 +1,17 @@
-# === Fig Variety AI Agent (v2) ===
+# === Fig Variety AI Agent (v3.2 - Gemini Hotfix) ===
 
 import os
 from enum import Enum, auto
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings # Deprecation 경고 해결
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from dotenv import load_dotenv
+
+# .env 파일에서 환경 변수를 로드합니다.
+load_dotenv()
 
 class QueryCategory(Enum):
     """사용자 질문의 의도를 나타내는 분류 Enum"""
@@ -16,10 +24,12 @@ class QueryCategory(Enum):
 
 class FigAgent:
     """
-    사용자 질문을 분류하고 RAG 파이프라인을 관리하는 AI 에이전트 (개선 버전)
+    사용자 질문을 분류하고 RAG 파이프라인을 관리하는 AI 에이전트 (Gemini 버전)
     """
     def __init__(self, varieties_db_path="./vector_db", features_db_path="./features_db", model_name="intfloat/multilingual-e5-base"):
-        print("🤖 Fig Agent를 초기화하는 중입니다...")
+        print("🤖 Fig Agent (Gemini)를 초기화하는 중입니다...")
+        
+        # Deprecation 경고가 해결된 새로운 클래스를 사용합니다.
         self.embedding = HuggingFaceEmbeddings(model_name=model_name)
         
         try:
@@ -28,6 +38,41 @@ class FigAgent:
         except Exception as e:
             print(f"DB 로드 실패: {e}")
             raise
+
+        # --- LLM 및 RAG 체인 설정 (Gemini) ---
+        # os.getenv를 사용하여 GOOGLE_API_KEY를 명시적으로 불러옵니다.
+        google_api_key = os.getenv("GEMINI_API_KEY")
+        if not google_api_key:
+            raise ValueError("GOOGLE_API_KEY 환경 변수를 찾을 수 없습니다. .env 파일을 확인해주세요.")
+            
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-pro", 
+            google_api_key=google_api_key, 
+            temperature=0, 
+            convert_system_message_to_human=True
+        )
+        self.retriever = self.features_db.as_retriever(search_kwargs={'k': 3})
+        
+        prompt_template = """
+        당신은 무화과 품종 전문가입니다. 사용자의 질문에 대해 아래의 '검색된 정보'를 바탕으로 친절하고 명확하게 답변해주세요.
+        답변은 반드시 한국어로 작성해야 합니다. 정보가 부족하여 답변할 수 없는 경우, "정보가 부족하여 답변하기 어렵습니다."라고 솔직하게 말해주세요.
+        
+        [검색된 정보]
+        {context}
+        
+        [사용자 질문]
+        {question}
+        
+        [전문가 답변]
+        """
+        self.prompt = ChatPromptTemplate.from_template(prompt_template)
+
+        self.rag_chain = (
+            {"context": self.retriever, "question": RunnablePassthrough()}
+            | self.prompt
+            | self.llm
+            | StrOutputParser()
+        )
 
         # --- 별명 및 오타 처리 시스템 ---
         self.variety_aliases = {
@@ -40,7 +85,6 @@ class FigAgent:
         }
         self.known_typos = ["ciccio vero"]
         
-        # 긴 이름 우선 매칭을 위해 모든 별명을 길이순으로 정렬
         self.sorted_aliases = []
         for canonical, alias_list in self.variety_aliases.items():
             for alias in alias_list:
@@ -103,22 +147,12 @@ class FigAgent:
             return f"'{data['variety']}' 품종에 대해 어떤 점이 궁금하신가요? 맛, 생산성, 나무 크기 등 구체적인 기준을 알려주시면 더 자세히 답변해 드릴 수 있습니다."
 
         elif category == QueryCategory.KNOWN_VARIETY_EXISTS:
-            print(f"  ▶️ '{data['variety']}'에 대한 정보 검색 중...")
-            results = self.features_db.similarity_search(data['query'], k=3)
-            if not results:
-                return f"'{data['variety']}'에 대한 관련 정보를 찾지 못했습니다."
-            
-            context = "\n".join([f"- {doc.page_content}" for doc in results])
-            return f"'{data['query']}'에 대한 검색 결과입니다:\n{context}"
+            print(f"  ▶️ '{data['variety']}'에 대한 정보 검색 및 답변 생성 중...")
+            return self.rag_chain.invoke(data['query'])
 
         elif category == QueryCategory.UNKNOWN_VARIETY_GENERAL_QUERY:
-            print("  ▶️ 특징 DB에서 추천 품종 검색 중...")
-            results = self.features_db.similarity_search(data['query'], k=2)
-            if not results:
-                return "관련 품종을 찾지 못했습니다."
-
-            context = "\n".join([f"- {doc.page_content}" for doc in results])
-            return f"'{data['query']}'와 관련하여 다음 품종 정보를 찾았습니다:\n{context}"
+            print("  ▶️ 특징 DB에서 추천 품종 검색 및 답변 생성 중...")
+            return self.rag_chain.invoke(data['query'])
             
         else:
             return "죄송합니다. 질문을 이해하지 못했습니다."
@@ -130,13 +164,12 @@ if __name__ == '__main__':
         
         queries_to_test = [
             "안녕?",
-            "브런즈윅의 열매는 작은가요?",
+            "브런즈윅의 내한성은 어떤가요?",
             "Ciccio Vero는 키우기 쉬운가요?",
             "브런즈윅은 키울만 한가요?",
             "달콤한 품종 추천해줘",
             "이 사진 속 무화과는 무슨 품종이야?",
-            "고마워",
-            "안녕?"
+            "고마워"
         ]
         
         for q in queries_to_test:
