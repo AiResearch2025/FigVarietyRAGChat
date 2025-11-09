@@ -41,7 +41,10 @@ class FigAgent:
             raise ValueError("GEMINI_API_KEY 환경 변수를 찾을 수 없습니다. .env 파일을 확인해주세요.")
         
         genai.configure(api_key=google_api_key)
-        self.llm = genai.GenerativeModel('gemini-2.5-flash') 
+        self.llm = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            generation_config=genai.types.GenerationConfig(temperature=0.2)
+        ) 
 
         # --- Retriever 설정 (LangChain 사용) ---
         self.retriever = self.features_db.as_retriever(search_kwargs={'k': 3})
